@@ -1,0 +1,140 @@
+#!/bin/bash
+# Utility for maintaining PDroid patches.
+#
+# Copyright (C) 2013 Peter Wu <lekensteyn@gmail.com>
+#
+# License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>.
+# This is free software: you are free to change and redistribute it.
+# There is NO WARRANTY, to the extent permitted by law.
+
+usage() {
+	[ -z "$1" ] || echo "$1"
+	cat <<EOF
+$0 command [command options]
+Patch-related commands, assuming the current working directory to be the
+android/system directory.
+
+Commands:
+
+  apply patch-prefix [patch-options]
+    patch-prefix   - Prefix for the patches to be included, relative to this
+      script. Example: 'openpdroid_4.2.1_'
+    patch-options  - Specify "--" for options to proceed with patching.
+
+  undo patch-prefix [patch-options]
+    See apply, this just reverses the apply operation (diff -R)
+
+  save patch-prefix
+    patch-prefix   - Prefix for the patches to be written, relative to this
+      script. Example: 'openpdroid_4.2.1_'
+
+  status
+    Prints each repository name with a tag/branch (git describe --all) and all
+    changes (git status --ignored).
+
+  foreach [-p] command [command args]
+    Execute the command within each repository directory.
+    -p             - Print the repository name of the current entry.
+EOF
+	exit
+}
+
+# git repos to patch
+repos=(
+build
+frameworks/base
+frameworks/opt/telephony
+libcore
+packages/apps/Mms
+)
+
+reposdir="$(pwd)/"
+print_repo=false
+# absolute path to patches
+patchdir="$(dirname "$(readlink -f "$0")")"
+patch_prefix=
+# do not prompt when patch is already (un)applied (-N), do not save .rej (-r
+# -), strip one level from the patch (-p1), do not create .orig files
+# (--no-backup-if-mismatch)
+patch_options=(-N -r - -p1 --no-backup-if-mismatch)
+
+command="$1"; shift
+case "$command" in
+apply|undo)
+	[ $# -ge 1 ] || usage "Missing patch prefix"
+	patch_prefix="$1"; shift
+
+	[[ $command != undo ]] || patch_options+=(-R)
+
+	patch_options+=("$@")
+	if [ $# -eq 0 ]; then
+		echo "Use '--' for patch-options to proceed with patching."
+		patch_options+=(--dry-run)
+	fi
+	;;
+save)
+	[ $# -ge 1 ] || usage "Missing patch prefix"
+	patch_prefix="$1"; shift
+	# Create directory for storing patches if not existent
+	# The "x" is a dummy filename. For prefix "foo", foox -> ., foo/x -> foo
+	mkdir -pv "$(dirname "$patchdir/${patch_prefix}x")"
+	;;
+foreach)
+	if [[ $1 == -p ]]; then
+		print_repo=true
+		shift
+	fi
+	[ $# -ge 1 ] || usage "Missing for-each command"
+	;;
+status)
+	print_repo=true
+	;;
+*)
+	usage "Unknown command $command"
+	;;
+esac
+
+for repo in "${repos[@]}"; do
+	patch="$patchdir/${patch_prefix}${repo//\//_}.patch"
+
+	$print_repo && echo "# ===== $repo ====="
+
+	cd "$reposdir$repo" || continue
+	if ! git rev-parse 2>/dev/null; then
+		echo "No git repo found for $repo, skipping" >&2
+		continue
+	fi
+
+	case $command in
+	apply|undo)
+		if [ ! -s "$patch" ]; then
+			echo "Patch ${patch##*/} not found" >&2
+			continue
+		fi
+		patch "${patch_options[@]}" < "$patch"
+		# add everything just for the sake of picking up changes. Not
+		# very nice as it messes up the staged changes, but better than
+		# ignoring changes at diff time
+		for opt in "${patch_options[@]}"; do [[ $opt == --dry-run ]] && break; done || git add .
+		# git apply cannot handle fuzz :/ -C42 does not work
+		#git apply "$@" "$patch"
+		;;
+	save)
+		if [ -s "$patch" ]; then
+			echo "Patch ${patch##*/} already exists."
+			read -p "Overwrite (y/N) " yn
+			[[ $yn == [Yy]* ]] || continue
+		fi
+		echo "Attempting to create patch for $repo"
+		git diff HEAD > "$patch"
+		;;
+	status)
+		echo -n "Ref: "
+		git describe --all
+		git status --ignored
+		;;
+	foreach)
+		"$@"
+		;;
+	esac
+done
